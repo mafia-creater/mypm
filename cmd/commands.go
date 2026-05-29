@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ripudaman/mypm/internal/config"
-	"github.com/ripudaman/mypm/internal/logger"
-	"github.com/ripudaman/mypm/internal/store"
+	"github.com/mafia-creater/mypm/internal/config"
+	"github.com/mafia-creater/mypm/internal/logger"
+	"github.com/mafia-creater/mypm/internal/store"
 )
 
 // ─── ADD ──────────────────────────────────────────────────────────────────────

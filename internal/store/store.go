@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ripudaman/mypm/internal/config"
+	"github.com/mafia-creater/mypm/internal/config"
 )
 
 // PackageMeta is stored as meta.json inside each package's store dir

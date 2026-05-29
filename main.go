@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/ripudaman/mypm/cmd"
+	"github.com/mafia-creater/mypm/cmd"
 )
 
 func main() {

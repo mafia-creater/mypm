@@ -5,7 +5,7 @@ A content-addressable Node.js package manager that eliminates `node_modules` dup
 ## Install
 
 ```bash
-git clone https://github.com/ripudaman/mypm
+git clone https://github.com/mafia-creater/mypm
 cd mypm
 go build -o mypm .
 sudo mv mypm /usr/local/bin/   # or add to PATH

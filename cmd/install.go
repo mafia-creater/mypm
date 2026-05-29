@@ -8,13 +8,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/ripudaman/mypm/internal/config"
-	"github.com/ripudaman/mypm/internal/linker"
-	"github.com/ripudaman/mypm/internal/logger"
-	"github.com/ripudaman/mypm/internal/store"
+	"github.com/mafia-creater/mypm/internal/config"
+	"github.com/mafia-creater/mypm/internal/fetcher"
+	"github.com/mafia-creater/mypm/internal/linker"
+	"github.com/mafia-creater/mypm/internal/logger"
+	"github.com/mafia-creater/mypm/internal/resolver"
+	"github.com/mafia-creater/mypm/internal/store"
 )
 
-// PackageJSON represents the subset of package.json we care about
 type PackageJSON struct {
 	Name            string            `json:"name"`
 	Version         string            `json:"version"`
@@ -32,7 +33,6 @@ func runInstall(args []string) {
 	start := time.Now()
 	logger.Banner("mypm", Version)
 
-	// Load config
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Fatal("config error: %v", err)
@@ -44,162 +44,131 @@ func runInstall(args []string) {
 		cfg.StoreDir = *storeDir
 	}
 
-	// Find project root (directory containing package.json)
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		logger.Fatal("%v", err)
 	}
 	logger.Info("project root: %s", projectRoot)
 
-	// Read package.json
 	pkgJSON, err := readPackageJSON(filepath.Join(projectRoot, "package.json"))
 	if err != nil {
 		logger.Fatal("cannot read package.json: %v", err)
 	}
 
-	if *frozenLockfile {
-		logger.Info("--frozen-lockfile: lockfile validation is planned for Phase 3")
-	}
-
-	// Initialise store
 	s, err := store.New(cfg)
 	if err != nil {
 		logger.Fatal("store init failed: %v", err)
 	}
 
-	// Merge all deps
-	allDeps := mergeDeps(pkgJSON.Dependencies, pkgJSON.DevDependencies)
-	if len(allDeps) == 0 {
-		logger.Warn("no dependencies found in package.json")
-		return
+	// ── Step 1: check for existing lockfile ─────────────────────────────────
+	lf, err := resolver.ReadLockfile(projectRoot)
+	if err != nil {
+		logger.Fatal("reading lockfile: %v", err)
 	}
 
-	logger.Info("found %d top-level dependencies", len(allDeps))
-	logger.Info("store: %s", cfg.StoreDir)
+	if lf != nil && *frozenLockfile {
+		logger.Info("using existing lockfile (--frozen-lockfile)")
+	} else if lf == nil || lockfileOutOfSync(lf, pkgJSON) {
+		// ── Step 2: resolve ───────────────────────────────────────────────
+		fmt.Println()
+		logger.Step(1, 3, "resolving dependency tree...")
+		fmt.Println()
+
+		res := resolver.New(cfg.Registry)
+		result, err := res.Resolve(pkgJSON.Dependencies, pkgJSON.DevDependencies)
+		if err != nil {
+			logger.Fatal("resolution failed: %v", err)
+		}
+
+		// Print warnings (peer deps etc.)
+		for _, w := range result.Warnings {
+			logger.Warn("%s", w)
+		}
+
+		lf = result.Lockfile
+		if err := lf.Write(projectRoot); err != nil {
+			logger.Fatal("writing lockfile: %v", err)
+		}
+		logger.Info("wrote %s (%d packages)", resolver.LockfileName, len(lf.Packages))
+	} else {
+		logger.Info("lockfile up to date — skipping resolution")
+	}
+
+	// ── Step 3: fetch ────────────────────────────────────────────────────────
+	fmt.Println()
+	logger.Step(2, 3, "fetching packages (concurrency: %d)...", cfg.Concurrency)
 	fmt.Println()
 
-	// Phase 1 MVP: link packages that already exist in node_modules into the store
-	// Full resolver + fetcher comes in Phase 3
-	nodeModules := filepath.Join(projectRoot, "node_modules")
-	lnkr := linker.New(cfg)
-
-	linked, fromStore, skipped := 0, 0, 0
-
-	for pkgName := range allDeps {
-		srcDir := filepath.Join(nodeModules, pkgName)
-		if _, err := os.Stat(srcDir); os.IsNotExist(err) {
-			logger.Warn("%-30s not in node_modules (run npm install first, then mypm link)", pkgName)
-			skipped++
-			continue
-		}
-
-		// Check if already in store
-		version := allDeps[pkgName]
-		if s.HasPackage(pkgName, version) {
-			fromStore++
-			logger.Success("%-30s %s (cached)", pkgName, version)
-			continue
-		}
-
-		// Walk package files and populate store
-		if err := populateStore(s, cfg, pkgName, version, srcDir); err != nil {
-			logger.Error("%-30s store write failed: %v", pkgName, err)
-			continue
-		}
-
-		// Link from store back (demonstrates the link path)
-		result := lnkr.LinkPackage(nodeModules, pkgName, cfg.PackageDir(pkgName, version))
-		if result.Err != nil {
-			logger.Error("%-30s link failed: %v", pkgName, result.Err)
-			continue
-		}
-
-		linked++
-		logger.Success("%-30s %s [%s]", pkgName, version, result.Strategy)
+	f := fetcher.New(cfg, s)
+	var jobs []fetcher.FetchJob
+	for _, pkg := range lf.AllPackages() {
+		jobs = append(jobs, fetcher.FetchJob{
+			Name:    pkg.Name,
+			Version: pkg.Version,
+		})
 	}
 
-	// Store status
+	fetchResults := f.FetchAll(jobs)
+	downloaded, fromCache, failed := 0, 0, 0
+	for _, r := range fetchResults {
+		if r.Err != nil {
+			logger.Error("%-30s %v", r.Name, r.Err)
+			failed++
+			continue
+		}
+		if r.FromCache {
+			fromCache++
+		} else {
+			downloaded++
+		}
+	}
+	logger.Info("%d downloaded, %d from cache, %d failed", downloaded, fromCache, failed)
+
+	// ── Step 4: link ─────────────────────────────────────────────────────────
+	fmt.Println()
+	logger.Step(3, 3, "linking into node_modules...")
+	fmt.Println()
+
+	nodeModules := filepath.Join(projectRoot, "node_modules")
+	if err := os.MkdirAll(nodeModules, 0755); err != nil {
+		logger.Fatal("cannot create node_modules: %v", err)
+	}
+
+	lnkr := linker.New(cfg)
+	linked := 0
+	for _, pkg := range lf.AllPackages() {
+		pkgStoreDir := cfg.PackageDir(pkg.Name, pkg.Version)
+		res := lnkr.LinkPackage(nodeModules, pkg.Name, pkgStoreDir)
+		if res.Err != nil {
+			logger.Error("link %-28s %v", pkg.Name, res.Err)
+			continue
+		}
+		linked++
+	}
+
+	// ── Summary ──────────────────────────────────────────────────────────────
 	status, _ := s.Status()
 	storeMB := float64(status.TotalBytes) / 1024 / 1024
+	logger.Summary(downloaded+fromCache, fromCache, failed, storeMB, time.Since(start))
 
-	logger.Summary(linked, fromStore, skipped, storeMB, time.Since(start))
+	if failed > 0 {
+		os.Exit(1)
+	}
 }
 
-// populateStore walks a package directory and writes each file to the CAS store
-func populateStore(s *store.Store, cfg *config.Config, name, version, srcDir string) error {
-	pkgDir := cfg.PackageDir(name, version)
-	if err := os.MkdirAll(pkgDir, 0755); err != nil {
-		return err
-	}
-
-	var files []string
-	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return err
-		}
-		rel, _ := filepath.Rel(srcDir, path)
-		destPath := filepath.Join(pkgDir, rel)
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-			return err
-		}
-		// Write to file store (CAS) and also copy to package dir
-		if _, err := s.WriteFile(path); err != nil {
-			return fmt.Errorf("storing %s: %w", rel, err)
-		}
-		// Copy to package store dir so linker can hard-link from there
-		if err := copyToPackageStore(path, destPath); err != nil {
-			return err
-		}
-		files = append(files, rel)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return s.WriteMeta(&store.PackageMeta{
-		Name:    name,
-		Version: version,
-		Files:   files,
-	})
-}
-
-func copyToPackageStore(src, dest string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = copyIO(in, out)
-	return err
-}
-
-// copyIO is a minimal io.Copy wrapper
-func copyIO(r interface{ Read([]byte) (int, error) }, w interface{ Write([]byte) (int, error) }) (int64, error) {
-	buf := make([]byte, 32*1024)
-	var total int64
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			written, werr := w.Write(buf[:n])
-			total += int64(written)
-			if werr != nil {
-				return total, werr
-			}
-		}
-		if err != nil {
-			if err.Error() == "EOF" {
-				break
-			}
-			return total, err
+// lockfileOutOfSync returns true if package.json has deps not present in the lockfile
+func lockfileOutOfSync(lf *resolver.Lockfile, pkg *PackageJSON) bool {
+	for name := range pkg.Dependencies {
+		if _, ok := lf.Dependencies[name]; !ok {
+			return true
 		}
 	}
-	return total, nil
+	for name := range pkg.DevDependencies {
+		if _, ok := lf.Dependencies[name]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeDeps(deps ...map[string]string) map[string]string {

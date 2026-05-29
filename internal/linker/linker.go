@@ -6,8 +6,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ripudaman/mypm/internal/config"
-	"github.com/ripudaman/mypm/internal/logger"
+	"github.com/mafia-creater/mypm/internal/config"
+	"github.com/mafia-creater/mypm/internal/logger"
 )
 
 // Result reports what happened when linking a package
