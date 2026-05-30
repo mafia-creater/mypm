@@ -79,8 +79,8 @@ func cmp(a, b int) int {
 
 // Range represents a parsed semver range that can test versions
 type Range struct {
-	raw        string
-	conditions []condition
+	raw    string
+	groups [][]condition
 }
 
 type condition struct {
@@ -93,32 +93,51 @@ func ParseRange(s string) (*Range, error) {
 	s = strings.TrimSpace(s)
 	r := &Range{raw: s}
 
-	// Special cases
-	if s == "" || s == "*" || s == "latest" || s == "x" {
-		r.conditions = []condition{{op: "*"}}
-		return r, nil
+	parts := strings.Split(s, "||")
+	for _, part := range parts {
+		group, err := parseRangeSegment(part)
+		if err != nil {
+			return nil, err
+		}
+		if len(group) > 0 {
+			r.groups = append(r.groups, group)
+		}
 	}
+	if len(r.groups) == 0 {
+		r.groups = [][]condition{{{op: "*"}}}
+	}
+	return r, nil
+}
 
-	// Handle " || " (OR ranges) — pick the first segment for now (Phase 3 simplification)
-	if strings.Contains(s, "||") {
-		parts := strings.SplitN(s, "||", 2)
-		return ParseRange(strings.TrimSpace(parts[0]))
+func parseRangeSegment(s string) ([]condition, error) {
+	s = strings.TrimSpace(s)
+
+	// Special cases
+	if s == "" || s == "*" || s == "latest" || strings.EqualFold(s, "x") {
+		return []condition{{op: "*"}}, nil
 	}
 
 	// Handle space-separated AND ranges e.g. ">=1.0.0 <2.0.0"
 	parts := strings.Fields(s)
+	conds := make([]condition, 0, len(parts))
 	for _, p := range parts {
 		c, err := parseCondition(p)
 		if err != nil {
 			return nil, err
 		}
-		r.conditions = append(r.conditions, c)
+		conds = append(conds, c)
 	}
-	return r, nil
+	return conds, nil
 }
 
 func parseCondition(s string) (condition, error) {
 	s = strings.TrimSpace(s)
+
+	if c, ok, err := parseXRange(s); ok {
+		return c, err
+	} else if err != nil {
+		return condition{}, err
+	}
 
 	// Operators: >=, <=, >, <, =, ^, ~
 	for _, op := range []string{">=", "<=", ">", "<", "="} {
@@ -173,6 +192,39 @@ func parseCondition(s string) (condition, error) {
 	return condition{op: "=", version: v}, nil
 }
 
+func parseXRange(s string) (condition, bool, error) {
+	parts := strings.Split(s, ".")
+	wildcardIndex := -1
+	for i, p := range parts {
+		if isXRangePart(p) {
+			wildcardIndex = i
+			break
+		}
+	}
+	if wildcardIndex == -1 {
+		return condition{}, false, nil
+	}
+	if wildcardIndex == 0 {
+		return condition{op: "*"}, true, nil
+	}
+	if !isBareInt(parts[0]) {
+		return condition{}, false, fmt.Errorf("invalid x-range %q", s)
+	}
+	major, _ := strconv.Atoi(parts[0])
+	if wildcardIndex == 1 {
+		return condition{op: "^", version: Version{Major: major}}, true, nil
+	}
+	if len(parts) < 2 || !isBareInt(parts[1]) {
+		return condition{}, false, fmt.Errorf("invalid x-range %q", s)
+	}
+	minor, _ := strconv.Atoi(parts[1])
+	return condition{op: "~", version: Version{Major: major, Minor: minor}}, true, nil
+}
+
+func isXRangePart(s string) bool {
+	return s == "x" || s == "X" || s == "*"
+}
+
 func isBareInt(s string) bool {
 	for _, c := range s {
 		if c < '0' || c > '9' {
@@ -194,19 +246,36 @@ func isBareMinor(s string) bool {
 func (r *Range) Satisfies(v Version) bool {
 	// Prerelease versions are excluded unless the range explicitly targets them
 	if v.Pre != "" {
-		hasPreTarget := false
-		for _, c := range r.conditions {
-			if c.version.Pre != "" {
-				hasPreTarget = true
-				break
+		for _, group := range r.groups {
+			if !groupHasPreTarget(group) {
+				continue
+			}
+			if groupSatisfies(group, v) {
+				return true
 			}
 		}
-		if !hasPreTarget {
-			return false
-		}
+		return false
 	}
 
-	for _, c := range r.conditions {
+	for _, group := range r.groups {
+		if groupSatisfies(group, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func groupHasPreTarget(conds []condition) bool {
+	for _, c := range conds {
+		if c.version.Pre != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func groupSatisfies(conds []condition, v Version) bool {
+	for _, c := range conds {
 		if !c.satisfies(v) {
 			return false
 		}
