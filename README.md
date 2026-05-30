@@ -14,9 +14,14 @@ sudo mv mypm /usr/local/bin/   # or add to PATH
 ## Commands
 
 ```bash
-mypm install          # Link all deps from existing node_modules into store
-mypm add react@18     # (Phase 3) Fetch + link a package
-mypm remove lodash    # (Phase 3) Remove a package
+mypm init             # Create a new package.json interactively
+mypm install          # Resolve + fetch + link deps from package.json
+mypm add react@18     # Add a dependency (also fetches + links)
+mypm remove lodash    # Remove a dependency and relink
+mypm run build        # Run a package.json script
+mypm start            # Run the "start" script
+mypm test             # Run the "test" script
+mypm build            # Run the "build" script
 mypm store path       # Print store location
 mypm store status     # Show store size and package count
 mypm doctor           # Health check: filesystem, hard link support, store integrity
@@ -34,16 +39,18 @@ concurrency = 8
 
 ## How it works
 
-1. **Phase 1 (current)** — Run `npm install` once, then `mypm install` moves all packages into the global store (`~/.mypm/store`) and replaces node_modules entries with hard links. Zero extra disk space for any subsequent project sharing the same packages.
+1. **Current** — `mypm install` reads `package.json`, resolves versions, fetches tarballs from the registry, stores them in the global store (`~/.mypm/store`), and links them into `node_modules` (hardlink/symlink/copy).
 
-2. **Phase 3 (planned)** — Full resolver + fetcher. `mypm install` replaces npm entirely.
+2. **Lockfile** — `mypm.lock` captures the full dependency graph and resolved versions for reproducible installs.
 
 ## Architecture
 
 ```
-mypm install
-  └─ cmd/install.go       CLI flag parsing, orchestration
+mypm install / add / remove
+  └─ cmd/*.go             CLI flag parsing, orchestration
   └─ internal/config      Reads ~/.mypmrc, manages store paths
+  └─ internal/resolver    Semver + dependency resolution
+  └─ internal/fetcher     Registry fetch + tarball unpack
   └─ internal/store       Content-addressable store (SHA-256 keyed)
   └─ internal/linker      Hard link / symlink / copy strategy with fallback
   └─ internal/logger      Colored terminal output

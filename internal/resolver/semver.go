@@ -117,10 +117,15 @@ func parseRangeSegment(s string) ([]condition, error) {
 		return []condition{{op: "*"}}, nil
 	}
 
-	// Handle space-separated AND ranges e.g. ">=1.0.0 <2.0.0"
+	// Handle space-separated AND ranges e.g. ">=1.0.0 <2.0.0" or ">= 1.0.0 < 2.0.0"
 	parts := strings.Fields(s)
 	conds := make([]condition, 0, len(parts))
-	for _, p := range parts {
+	for i := 0; i < len(parts); i++ {
+		p := parts[i]
+		if isRangeOpToken(p) && i+1 < len(parts) {
+			p = p + parts[i+1]
+			i++
+		}
 		c, err := parseCondition(p)
 		if err != nil {
 			return nil, err
@@ -128,6 +133,15 @@ func parseRangeSegment(s string) ([]condition, error) {
 		conds = append(conds, c)
 	}
 	return conds, nil
+}
+
+func isRangeOpToken(s string) bool {
+	switch s {
+	case ">", ">=", "<", "<=", "=":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseCondition(s string) (condition, error) {
@@ -151,7 +165,7 @@ func parseCondition(s string) (condition, error) {
 	}
 
 	if strings.HasPrefix(s, "^") {
-		v, err := ParseVersion(strings.TrimPrefix(s, "^"))
+		v, err := parseVersionMaybeShort(strings.TrimPrefix(s, "^"))
 		if err != nil {
 			return condition{}, err
 		}
@@ -159,7 +173,7 @@ func parseCondition(s string) (condition, error) {
 	}
 
 	if strings.HasPrefix(s, "~") {
-		v, err := ParseVersion(strings.TrimPrefix(s, "~"))
+		v, err := parseVersionMaybeShort(strings.TrimPrefix(s, "~"))
 		if err != nil {
 			return condition{}, err
 		}
@@ -185,11 +199,22 @@ func parseCondition(s string) (condition, error) {
 	}
 
 	// Plain version "1.2.3" → exact match
-	v, err := ParseVersion(s)
+	v, err := parseVersionMaybeShort(s)
 	if err != nil {
 		return condition{}, fmt.Errorf("cannot parse range condition %q: %w", s, err)
 	}
 	return condition{op: "=", version: v}, nil
+}
+
+func parseVersionMaybeShort(s string) (Version, error) {
+	// Accept short forms like "4" or "4.1" by padding with zeros.
+	if isBareInt(s) {
+		return ParseVersion(s + ".0.0")
+	}
+	if isBareMinor(s) {
+		return ParseVersion(s + ".0")
+	}
+	return ParseVersion(s)
 }
 
 func parseXRange(s string) (condition, bool, error) {

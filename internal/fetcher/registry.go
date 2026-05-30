@@ -20,7 +20,7 @@ type RegistryVersion struct {
 	Version      string            `json:"version"`
 	Dependencies map[string]string `json:"dependencies"`
 	PeerDeps     map[string]string `json:"peerDependencies"`
-	Engines      map[string]string `json:"engines"`
+	Engines      json.RawMessage   `json:"engines"`
 	Dist         struct {
 		Tarball   string `json:"tarball"`   // download URL for the .tgz
 		Integrity string `json:"integrity"` // sha512-<base64>
