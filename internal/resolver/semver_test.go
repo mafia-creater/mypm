@@ -53,6 +53,12 @@ func TestRangeSatisfies(t *testing.T) {
 		// Exact
 		{"1.2.3", "1.2.3", true},
 		{"1.2.3", "1.2.4", false},
+		// X ranges
+		{"1.x", "1.5.0", true},
+		{"1.x", "2.0.0", false},
+		{"1.2.x", "1.2.9", true},
+		{"1.2.x", "1.3.0", false},
+		{"1.x.x", "1.9.9", true},
 		// Prerelease excluded unless explicitly targeted
 		{"^1.0.0", "1.1.0-beta.1", false},
 	}
@@ -76,17 +82,51 @@ func TestRangeSatisfies(t *testing.T) {
 }
 
 func TestBestMatch(t *testing.T) {
-	candidates := []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"}
-
 	cases := []struct {
-		rangeStr string
-		want     string
+		rangeStr   string
+		candidates []string
+		want       string
 	}{
-		{"^18.0.0", "18.2.0"},
-		{"^17.0.0", "17.0.0"},
-		{">=16.0.0 <18.0.0", "17.0.0"},
-		{"~18.1.0", "18.1.0"},
-		{"*", "19.0.0"},
+		{
+			rangeStr:   "^18.0.0",
+			candidates: []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"},
+			want:       "18.2.0",
+		},
+		{
+			rangeStr:   "^17.0.0",
+			candidates: []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"},
+			want:       "17.0.0",
+		},
+		{
+			rangeStr:   ">=16.0.0 <18.0.0",
+			candidates: []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"},
+			want:       "17.0.0",
+		},
+		{
+			rangeStr:   "~18.1.0",
+			candidates: []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"},
+			want:       "18.1.0",
+		},
+		{
+			rangeStr:   "*",
+			candidates: []string{"16.0.0", "17.0.0", "18.0.0", "18.1.0", "18.2.0", "19.0.0"},
+			want:       "19.0.0",
+		},
+		{
+			rangeStr:   "^1.0.0 || ^2.0.0",
+			candidates: []string{"1.0.0", "1.5.0", "2.0.0", "2.4.0", "3.0.0"},
+			want:       "2.4.0",
+		},
+		{
+			rangeStr:   "1.x",
+			candidates: []string{"1.0.0", "1.5.0", "2.0.0", "2.4.0", "3.0.0"},
+			want:       "1.5.0",
+		},
+		{
+			rangeStr:   "1.2.x",
+			candidates: []string{"1.2.0", "1.2.5", "1.3.0"},
+			want:       "1.2.5",
+		},
 	}
 
 	for _, c := range cases {
@@ -94,7 +134,7 @@ func TestBestMatch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseRange(%q): %v", c.rangeStr, err)
 		}
-		got, err := r.BestMatch(candidates)
+		got, err := r.BestMatch(c.candidates)
 		if err != nil {
 			t.Errorf("BestMatch(%q) error: %v", c.rangeStr, err)
 			continue

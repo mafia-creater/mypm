@@ -3,6 +3,7 @@ package resolver
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/mafia-creater/mypm/internal/fetcher"
@@ -72,11 +73,8 @@ func (r *Resolver) resolvePackage(
 		return fmt.Errorf("dependency depth limit reached for %s (possible circular dep)", name)
 	}
 
-	// Parse the semver range
-	semRange, err := ParseRange(rangeStr)
-	if err != nil {
-		logger.Warn("cannot parse range %q for %s, treating as latest", rangeStr, name)
-		semRange, _ = ParseRange("*")
+	if shouldSkipRange(name, rangeStr) {
+		return nil
 	}
 
 	// Fetch full package metadata (cached)
@@ -85,14 +83,26 @@ func (r *Resolver) resolvePackage(
 		return err
 	}
 
-	// Get sorted version list (descending — best match first)
-	versions := sortedVersions(meta.Versions)
+	resolvedVersion := ""
+	if version, ok := resolveTag(rangeStr, meta); ok {
+		resolvedVersion = version
+	} else {
+		// Parse the semver range
+		semRange, err := ParseRange(rangeStr)
+		if err != nil {
+			logger.Warn("cannot parse range %q for %s, treating as latest", rangeStr, name)
+			semRange, _ = ParseRange("*")
+		}
 
-	// Pick best matching version
-	resolvedVersion, err := semRange.BestMatch(versions)
-	if err != nil {
-		return fmt.Errorf("no version of %s satisfies %q (available: %s)",
-			name, rangeStr, summarizeVersions(versions))
+		// Get sorted version list (descending — best match first)
+		versions := sortedVersions(meta.Versions)
+
+		// Pick best matching version
+		resolvedVersion, err = semRange.BestMatch(versions)
+		if err != nil {
+			return fmt.Errorf("no version of %s satisfies %q (available: %s)",
+				name, rangeStr, summarizeVersions(versions))
+		}
 	}
 
 	key := LockKey(name, resolvedVersion)
@@ -146,6 +156,31 @@ func (r *Resolver) resolvePackage(
 	}
 
 	return nil
+}
+
+func shouldSkipRange(name, rangeStr string) bool {
+	switch {
+	case strings.HasPrefix(rangeStr, "file:"):
+		logger.Warn("%s: local file references not supported", name)
+		return true
+	case strings.HasPrefix(rangeStr, "git+"),
+		strings.HasPrefix(rangeStr, "github:"),
+		(strings.Count(rangeStr, "/") == 1 && !strings.HasPrefix(rangeStr, "@")):
+		logger.Warn("%s: git references not supported", name)
+		return true
+	case strings.HasPrefix(rangeStr, "https://"), strings.HasPrefix(rangeStr, "http://"):
+		logger.Warn("%s: URL references not supported", name)
+		return true
+	}
+	return false
+}
+
+func resolveTag(tag string, meta *fetcher.RegistryPackage) (string, bool) {
+	if meta == nil || meta.DistTags == nil {
+		return "", false
+	}
+	version, ok := meta.DistTags[strings.TrimSpace(tag)]
+	return version, ok
 }
 
 // getPackageMeta returns cached metadata or fetches from registry
