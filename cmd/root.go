@@ -29,6 +29,14 @@ func Execute() {
 		runAdd(os.Args[2:])
 	case "remove", "rm":
 		runRemove(os.Args[2:])
+	case "run":
+		runRun(os.Args[2:])
+	case "start":
+		runStart(os.Args[2:])
+	case "test":
+		runTest(os.Args[2:])
+	case "build":
+		runBuild(os.Args[2:])
 	case "store":
 		runStore(os.Args[2:])
 	case "doctor":
@@ -56,6 +64,10 @@ func usage() {
     install              Install all dependencies from package.json
     add <pkg>[@ver]      Add a new dependency
     remove <pkg>         Remove a dependency
+    run <script>         Execute a script from package.json
+    start                Start the application
+    test                 Run tests
+    build                Build the application
     store path           Print the global store path
     store status         Show store stats and disk savings
     doctor               Check store health and link integrity
