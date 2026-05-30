@@ -147,12 +147,47 @@ func parseCondition(s string) (condition, error) {
 		return condition{op: "~", version: v}, nil
 	}
 
+	// Bare major "1" or "12" → treat as "^1.0.0" / "^12.0.0"
+	if isBareInt(s) {
+		v, err := ParseVersion(s + ".0.0")
+		if err != nil {
+			return condition{}, err
+		}
+		return condition{op: "^", version: v}, nil
+	}
+
+	// Bare major.minor "1.2" → treat as "^1.2.0"
+	if isBareMinor(s) {
+		v, err := ParseVersion(s + ".0")
+		if err != nil {
+			return condition{}, err
+		}
+		return condition{op: "^", version: v}, nil
+	}
+
 	// Plain version "1.2.3" → exact match
 	v, err := ParseVersion(s)
 	if err != nil {
 		return condition{}, fmt.Errorf("cannot parse range condition %q: %w", s, err)
 	}
 	return condition{op: "=", version: v}, nil
+}
+
+func isBareInt(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+func isBareMinor(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 2 {
+		return false
+	}
+	return isBareInt(parts[0]) && isBareInt(parts[1])
 }
 
 // Satisfies returns true if version v satisfies this range

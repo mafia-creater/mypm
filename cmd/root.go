@@ -21,6 +21,8 @@ func Execute() {
 	subcommand := os.Args[1]
 
 	switch subcommand {
+	case "init":
+		runInit(os.Args[2:])
 	case "install", "i":
 		runInstall(os.Args[2:])
 	case "add":
@@ -50,6 +52,7 @@ func usage() {
     mypm <command> [flags]
 
   COMMANDS
+    init                 Create a new package.json interactively
     install              Install all dependencies from package.json
     add <pkg>[@ver]      Add a new dependency
     remove <pkg>         Remove a dependency
@@ -64,6 +67,8 @@ func usage() {
     --store-dir          Override store directory path
 
   EXAMPLES
+    mypm init
+    mypm init -y
     mypm install
     mypm add react@18
     mypm add -D typescript

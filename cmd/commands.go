@@ -1,12 +1,17 @@
 package cmd
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/mafia-creater/mypm/internal/config"
+	"github.com/mafia-creater/mypm/internal/fetcher"
+	"github.com/mafia-creater/mypm/internal/linker"
 	"github.com/mafia-creater/mypm/internal/logger"
+	"github.com/mafia-creater/mypm/internal/resolver"
 	"github.com/mafia-creater/mypm/internal/store"
 )
 
@@ -23,21 +28,112 @@ func runAdd(args []string) {
 		os.Exit(1)
 	}
 
-	logger.Banner("mypm add", Version)
+	logger.Banner("mypm", Version)
+
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatal("config: %v", err)
+	}
+
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		logger.Fatal("%v", err)
+	}
+
+	// Read package.json
+	pkgPath := projectRoot + "/package.json"
+	pkgJSON, err := readPackageJSON(pkgPath)
+	if err != nil {
+		logger.Fatal("cannot read package.json: %v", err)
+	}
+	if pkgJSON.Dependencies == nil {
+		pkgJSON.Dependencies = make(map[string]string)
+	}
+	if pkgJSON.DevDependencies == nil {
+		pkgJSON.DevDependencies = make(map[string]string)
+	}
+
+	s, err := store.New(cfg)
+	if err != nil {
+		logger.Fatal("store: %v", err)
+	}
+
+	res := resolver.New(cfg.Registry)
+	f := fetcher.New(cfg, s)
+	lnkr := linker.New(cfg)
+
+	nodeModules := projectRoot + "/node_modules"
+	os.MkdirAll(nodeModules, 0755)
 
 	for _, pkg := range packages {
-		if *dev {
-			logger.Info("adding %s as devDependency", pkg)
-		} else {
-			logger.Info("adding %s as dependency", pkg)
+		// Split "react@18" or "react@^18.0.0" or "react@latest" or just "react"
+		name, rangeStr := splitPackageArg(pkg, cfg.Registry)
+
+		logger.Info("resolving %s@%s ...", name, rangeStr)
+
+		// Resolve just this one package (and its transitive deps)
+		deps := map[string]string{name: rangeStr}
+		result, err := res.Resolve(deps, nil)
+		if err != nil {
+			logger.Error("resolution failed for %s: %v", name, err)
+			continue
 		}
-		// Phase 3: resolver + fetcher will handle this
-		// For now, inform user
-		logger.Warn("full fetcher not yet implemented — use `npm install %s` then `mypm install` to link", pkg)
+
+		for _, w := range result.Warnings {
+			logger.Warn("%s", w)
+		}
+
+		// Fetch all resolved packages
+		var jobs []fetcher.FetchJob
+		for _, p := range result.Lockfile.AllPackages() {
+			jobs = append(jobs, fetcher.FetchJob{Name: p.Name, Version: p.Version})
+		}
+		fetchResults := f.FetchAll(jobs)
+		for _, fr := range fetchResults {
+			if fr.Err != nil {
+				logger.Error("fetch %s: %v", fr.Name, fr.Err)
+			}
+		}
+
+		// Link into node_modules
+		for _, p := range result.Lockfile.AllPackages() {
+			pkgStoreDir := cfg.PackageDir(p.Name, p.Version)
+			lr := lnkr.LinkPackage(nodeModules, p.Name, pkgStoreDir)
+			if lr.Err != nil {
+				logger.Error("link %s: %v", p.Name, lr.Err)
+			}
+		}
+
+		// Get the exact resolved version for the top-level package
+		resolvedVersion := result.Lockfile.Dependencies[name]
+		rangeToSave := "^" + resolvedVersion
+
+		// Update package.json
+		if *dev {
+			pkgJSON.DevDependencies[name] = rangeToSave
+			logger.Success("added %s@%s to devDependencies", name, rangeToSave)
+		} else {
+			pkgJSON.Dependencies[name] = rangeToSave
+			logger.Success("added %s@%s to dependencies", name, rangeToSave)
+		}
+	}
+
+	// Write updated package.json
+	if err := writePackageJSON(pkgPath, pkgJSON); err != nil {
+		logger.Fatal("writing package.json: %v", err)
+	}
+
+	// Rewrite lockfile with all current deps
+	allResult, err := res.Resolve(pkgJSON.Dependencies, pkgJSON.DevDependencies)
+	if err != nil {
+		logger.Warn("could not update lockfile: %v", err)
+		return
+	}
+	if err := allResult.Lockfile.Write(projectRoot); err != nil {
+		logger.Warn("writing lockfile: %v", err)
 	}
 
 	fmt.Println()
-	logger.Info("Phase 3 roadmap: mypm add will resolve + fetch + link without npm")
 }
 
 // ─── REMOVE ───────────────────────────────────────────────────────────────────
@@ -52,30 +148,63 @@ func runRemove(args []string) {
 		os.Exit(1)
 	}
 
-	logger.Banner("mypm remove", Version)
+	logger.Banner("mypm", Version)
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		logger.Fatal("%v", err)
 	}
 
-	pkgJSON, err := readPackageJSON(projectRoot + "/package.json")
+	pkgPath := projectRoot + "/package.json"
+	pkgJSON, err := readPackageJSON(pkgPath)
 	if err != nil {
 		logger.Fatal("cannot read package.json: %v", err)
 	}
 
-	for _, pkg := range packages {
-		if _, ok := pkgJSON.Dependencies[pkg]; ok {
-			logger.Info("removing %s from dependencies", pkg)
-		} else if _, ok := pkgJSON.DevDependencies[pkg]; ok {
-			logger.Info("removing %s from devDependencies", pkg)
-		} else {
-			logger.Warn("%s not found in package.json", pkg)
+	nodeModules := projectRoot + "/node_modules"
+
+	for _, name := range packages {
+		removed := false
+		if _, ok := pkgJSON.Dependencies[name]; ok {
+			delete(pkgJSON.Dependencies, name)
+			removed = true
+		}
+		if _, ok := pkgJSON.DevDependencies[name]; ok {
+			delete(pkgJSON.DevDependencies, name)
+			removed = true
+		}
+		if !removed {
+			logger.Warn("%s not found in package.json", name)
 			continue
 		}
-		// Phase 3: will edit package.json + re-link
-		logger.Warn("package.json editing not yet implemented — manually remove %s, then run mypm install", pkg)
+
+		// Remove from node_modules
+		pkgDir := nodeModules + "/" + name
+		if err := os.RemoveAll(pkgDir); err != nil {
+			logger.Warn("could not remove %s from node_modules: %v", name, err)
+		} else {
+			logger.Success("removed %s", name)
+		}
 	}
+
+	// Write updated package.json
+	if err := writePackageJSON(pkgPath, pkgJSON); err != nil {
+		logger.Fatal("writing package.json: %v", err)
+	}
+
+	// Rewrite lockfile without removed packages
+	cfg, _ := config.Load()
+	res := resolver.New(cfg.Registry)
+	allResult, err := res.Resolve(pkgJSON.Dependencies, pkgJSON.DevDependencies)
+	if err != nil {
+		logger.Warn("could not update lockfile: %v", err)
+		return
+	}
+	if err := allResult.Lockfile.Write(projectRoot); err != nil {
+		logger.Warn("writing lockfile: %v", err)
+	}
+	logger.Info("updated package.json and mypm.lock")
+	fmt.Println()
 }
 
 // ─── STORE ────────────────────────────────────────────────────────────────────
@@ -94,10 +223,8 @@ func runStore(args []string) {
 	switch args[0] {
 	case "path":
 		fmt.Println(cfg.StoreDir)
-
 	case "status":
 		runStoreStatus(cfg)
-
 	default:
 		logger.Error("unknown store subcommand: %s", args[0])
 		os.Exit(1)
@@ -123,11 +250,8 @@ func runStoreStatus(cfg *config.Config) {
 	fmt.Printf("  Packages     : %d\n", status.PackageCount)
 	fmt.Printf("  Unique files : %.1f MB on disk\n", storeMB)
 	fmt.Println()
-
 	if storeMB > 0 {
-		// Rough savings estimate: average Next.js project = 300MB
-		// If we have N packages and store is X MB, savings per project = 300 - (X/N * deps)
-		logger.Info("every new project that shares these packages costs ~0 extra disk space")
+		logger.Info("every new project sharing these packages costs ~0 extra disk space")
 	} else {
 		logger.Info("store is empty — run `mypm install` in a project to populate it")
 	}
@@ -180,7 +304,7 @@ func checkStoreExists(cfg *config.Config) (string, bool) {
 	if _, err := os.Stat(cfg.StoreDir); err == nil {
 		return cfg.StoreDir, true
 	}
-	return "not found (will be created on first install)", true // non-fatal
+	return "not found (will be created on first install)", true
 }
 
 func checkStoreWritable(cfg *config.Config) (string, bool) {
@@ -204,9 +328,8 @@ func checkHardLinkSupport(cfg *config.Config) (string, bool) {
 	os.WriteFile(srcPath, []byte("test"), 0644)
 	defer os.Remove(srcPath)
 	defer os.Remove(dstPath)
-
 	if err := os.Link(srcPath, dstPath); err != nil {
-		return fmt.Sprintf("not supported on this filesystem (%v) — will use symlinks", err), true // warn not fail
+		return fmt.Sprintf("not supported (%v) — will use symlinks", err), true
 	}
 	return "supported (optimal)", true
 }
@@ -221,8 +344,40 @@ func checkConfigFile(cfg *config.Config) (string, bool) {
 }
 
 func checkRegistry(_ *config.Config) (string, bool) {
-	// Phase 3: do an actual HTTP HEAD to registry
-	// For now just report the configured URL
 	cfg, _ := config.Load()
 	return fmt.Sprintf("configured: %s (network check in Phase 3)", cfg.Registry), true
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// splitPackageArg splits "react@18" into ("react", "18")
+// If no @ given, returns ("react", "latest")
+func splitPackageArg(pkg, registry string) (name, rangeStr string) {
+	// Handle scoped packages like @types/node@18
+	if strings.HasPrefix(pkg, "@") {
+		// "@scope/name@version" → find the second @
+		rest := pkg[1:] // drop leading @
+		if idx := strings.LastIndex(rest, "@"); idx >= 0 {
+			return "@" + rest[:idx], rest[idx+1:]
+		}
+		return pkg, "latest"
+	}
+
+	if idx := strings.LastIndex(pkg, "@"); idx > 0 {
+		return pkg[:idx], pkg[idx+1:]
+	}
+	return pkg, "latest"
+}
+
+// writePackageJSON writes an updated PackageJSON back to disk
+func writePackageJSON(path string, pkg *PackageJSON) error {
+	data, err := json.MarshalIndent(pkg, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
