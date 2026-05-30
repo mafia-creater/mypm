@@ -23,6 +23,10 @@ func Execute() {
 	switch subcommand {
 	case "init":
 		runInit(os.Args[2:])
+	case "create":
+		runCreate(os.Args[2:])
+	case "dlx", "exec":
+		runDlx(os.Args[2:])
 	case "install", "i":
 		runInstall(os.Args[2:])
 	case "add":
@@ -61,6 +65,8 @@ func usage() {
 
   COMMANDS
     init                 Create a new package.json interactively
+		create <name>[@ver]  Run a create-* scaffolder (npx-style)
+		dlx <pkg>[@ver]      Download and run a package bin (npx-style)
     install              Install all dependencies from package.json
     add <pkg>[@ver]      Add a new dependency
     remove <pkg>         Remove a dependency
@@ -81,6 +87,8 @@ func usage() {
   EXAMPLES
     mypm init
     mypm init -y
+		mypm create next@latest my-app
+		mypm dlx create-vite@latest my-vite-app
     mypm install
     mypm add react@18
     mypm add -D typescript

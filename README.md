@@ -15,6 +15,8 @@ sudo mv mypm /usr/local/bin/   # or add to PATH
 
 ```bash
 mypm init             # Create a new package.json interactively
+mypm create next@latest my-app  # Run create-* scaffolder (npx-style)
+mypm dlx create-vite@latest my-vite-app # Download and run a package bin
 mypm install          # Resolve + fetch + link deps from package.json
 mypm add react@18     # Add a dependency (also fetches + links)
 mypm remove lodash    # Remove a dependency and relink

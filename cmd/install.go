@@ -19,6 +19,7 @@ import (
 type PackageJSON struct {
 	Name            string            `json:"name"`
 	Version         string            `json:"version"`
+	Scripts         map[string]string `json:"scripts"`
 	Dependencies    map[string]string `json:"dependencies"`
 	DevDependencies map[string]string `json:"devDependencies"`
 }
